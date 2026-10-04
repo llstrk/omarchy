@@ -24,7 +24,7 @@ assert(panelSource.includes('busy: tailscale.busy || tailscale.connecting || tai
 assert(serviceSource.includes('if (!installed || loginProcess.running || _loginInProgress) return'), 'tailscale also guards repeated login requests from IPC and keyboard')
 assert(/id: loginTimeoutTimer\s+interval: 25000/.test(serviceSource), 'tailscale bounds login URL waiting to 25 seconds')
 assert(serviceSource.includes('if (!root._loginInProgress) root.actionStatus = ""'), 'tailscale keeps login progress after the LocalAPI request returns')
-assert(/if \(root\._loginTimedOut\) \{\s+delayedRefresh\.restart\(\)\s+return/.test(serviceSource), 'tailscale preserves the timeout message when the terminated request exits')
+assert(/if \(root\._loginTimedOut \|\| root\._loginSuperseded\) \{\s+root\._loginSuperseded = false\s+delayedRefresh\.restart\(\)\s+return/.test(serviceSource), 'tailscale preserves the timeout message when the terminated request exits')
 // mask 18 = NotifyInitialState (2) | NotifyNoPrivateKeys (16): the stream must not carry the node's private key.
 assert(serviceSource.includes('stateWatchProcess.command = ["tailscale", "debug", "localapi", "GET", "/localapi/v0/watch-ipn-bus?mask=18"]'), 'tailscale watches the IPN notification bus without private keys')
 assert(/function scheduleStateWatchRestart\(\) \{\s+if \(!installed\) return\s+stateWatchRestartTimer\.interval = _stateWatchBackoffMs\s+_stateWatchBackoffMs = Math\.min\(_stateWatchBackoffMs \* 2, 60000\)\s+stateWatchRestartTimer\.restart\(\)/.test(serviceSource), 'tailscale backs off IPN watcher restarts up to a minute')
@@ -166,6 +166,45 @@ loginTransition.parseStatus(JSON.stringify({ BackendState: 'NeedsLogin', AuthURL
 vm.runInNewContext('(function() ' + deadline + ')()', loginTransition)
 assertEqual(browserOpens, opensBeforeDisconnect, 'late URL after disconnect cannot launch the browser')
 assertEqual(loginTransition.actionStatus, '', 'cancelled login cannot later show a login timeout')
+
+// Toggles from the keyboard, bar and IPC follow the busy switch.
+vm.runInNewContext(serviceSource.match(/  function toggleTailscale\([^]*?\n  \}/)[0], loginTransition)
+const realDown = loginTransition.down
+const realLoginOrUp = loginTransition.loginOrUp
+let toggles = 0
+loginTransition.down = loginTransition.loginOrUp = () => { toggles++ }
+loginTransition.active = true
+for (const [connecting, waitingForLogin] of [[true, false], [false, true]]) {
+  Object.assign(loginTransition, { connecting, waitingForLogin })
+  loginTransition.toggleTailscale()
+}
+assertEqual(toggles, 0, 'keyboard, bar and IPC toggles are ignored while connecting or waiting for a login link')
+Object.assign(loginTransition, { connecting: false, waitingForLogin: false })
+loginTransition.toggleTailscale()
+assertEqual(toggles, 1, 'toggles work again once the connection settles')
+Object.assign(loginTransition, { down: realDown, loginOrUp: realLoginOrUp })
+
+// A disconnect supersedes a resume request that is still in flight.
+const loginExit = serviceSource.slice(serviceSource.indexOf('id: loginProcess')).match(/onExited: (function\(exitCode\) \{[^]*?\n    \})/)[1]
+Object.assign(loginTransition, {
+  needsLogin: false, _loginTimedOut: false, _loginSuperseded: false, lastError: '', actionStatus: '',
+  loginProcess: { running: false, command: [] }, actionProcess: { running: false },
+  delayedRefresh: { restart() {} }, showActionError() { loginTransition.lastError = 'login error' }
+})
+loginTransition.loginOrUp()
+assert(loginTransition.loginProcess.running && loginTransition._desired === 1, 'resume request is in flight')
+loginTransition.down()
+vm.runInNewContext('(' + loginExit + ')(124)', loginTransition)
+assertEqual(loginTransition._desired, 0, 'a superseded resume request cannot undo the requested off state')
+assertEqual(loginTransition.lastError, '', 'a superseded resume request reports no error')
+assert(!loginTransition._loginSuperseded, 'the superseded marker clears when the request exits')
+
+// Health notifications arrive every few seconds and do not change the panel.
+const refreshesBefore = statusRefreshes
+loginTransition.handleStateWatchData(JSON.stringify({ Version: '1.102.3', Health: {} }))
+assertEqual(statusRefreshes, refreshesBefore, 'health-only IPN notifications do not query status')
+for (const field of ['State', 'Prefs', 'LoginFinished']) loginTransition.handleStateWatchData(JSON.stringify({ [field]: field === 'State' ? 6 : {} }))
+assertEqual(statusRefreshes, refreshesBefore + 3, 'state, preference and login notifications refresh status')
 
 assertDeepEqual(
   tailscale.filterIPv4(['100.64.0.1', 'fd7a:115c:a1e0::1', '192.168.1.2']),

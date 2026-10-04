@@ -60,6 +60,7 @@ Item {
   property string _loginError: ""
   readonly property bool waitingForLogin: _loginInProgress
   property bool _loginTimedOut: false
+  property bool _loginSuperseded: false
   property bool _loginInProgress: false
   property bool _loginUrlOpened: false
   property int _stateWatchBackoffMs: 2000
@@ -179,9 +180,9 @@ Item {
 
   function startStateWatch() {
     if (!installed || stateWatchProcess.running) return
-    // mask 18 = NotifyInitialState (2) | NotifyNoPrivateKeys (16). Only the
-    // State and BrowseToURL fields are read here, and the Prefs and NetMap
-    // notifications otherwise carry the node's private key.
+    // mask 18 = NotifyInitialState (2) | NotifyNoPrivateKeys (16). Only
+    // BrowseToURL is read, plus which fields are present. Current tailscaled
+    // always redacts private keys; the bit covers older daemons.
     stateWatchProcess.command = ["tailscale", "debug", "localapi", "GET", "/localapi/v0/watch-ipn-bus?mask=18"]
     stateWatchProcess.running = true
   }
@@ -205,7 +206,9 @@ Item {
       _stateWatchBackoffMs = 2000
       var browseUrl = String(notification.BrowseToURL || "")
       if (browseUrl !== "" && _loginInProgress && !_loginUrlOpened) openAuthUrl(browseUrl)
-      stateWatchRefreshTimer.restart()
+      // Health updates arrive every few seconds; only refresh for changes
+      // that affect what the panel shows.
+      if (notification.State != null || notification.Prefs != null || notification.LoginFinished != null) stateWatchRefreshTimer.restart()
     } catch (e) {
       console.warn("tailscale: failed to parse IPN notification", e)
     }
@@ -335,7 +338,8 @@ Item {
   }
 
   function toggleTailscale() {
-    if (!installed) return
+    // Match the busy switch for keyboard, bar and IPC toggles.
+    if (!installed || connecting || waitingForLogin) return
     if (active) down()
     else loginOrUp()
   }
@@ -345,6 +349,8 @@ Item {
     // the optimistic off; only surface a message if the command fails.
     _desired = 0
     _loginInProgress = false
+    // A resume or login request still in flight no longer reflects intent.
+    if (loginProcess.running) _loginSuperseded = true
     loginTimeoutTimer.stop()
     connectTimeoutTimer.stop()
     runAction(["tailscale", "down"])
@@ -700,7 +706,8 @@ Item {
       // The success body is the full prefs object; nothing here needs it.
       root._loginOutput = ""
       root._loginError = ""
-      if (root._loginTimedOut) {
+      if (root._loginTimedOut || root._loginSuperseded) {
+        root._loginSuperseded = false
         delayedRefresh.restart()
         return
       }
