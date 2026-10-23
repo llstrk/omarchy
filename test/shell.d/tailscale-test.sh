@@ -193,6 +193,39 @@ loginTransition.handleLoginOutput('access denied', true)
 vm.runInNewContext('(' + loginExit + ')(1)', loginTransition)
 assertEqual(reportedOutput.trim(), 'access denied', 'login errors leave out the LocalAPI request commentary')
 
+// A key that expired while stopped: after the resume PATCH, tailscaled
+// reports Running from its cached netmap for about a second, then NeedsLogin.
+// The transient Running settles _desired, but the same click must still log in.
+const connectDeadline = serviceSource.slice(serviceSource.indexOf('id: connectTimeoutTimer')).match(/onTriggered: (\{[^]*?\n    \})/)[1]
+function resumeFromStopped() {
+  Object.assign(loginTransition, {
+    needsLogin: false, authUrl: '', _desired: -1, _loginInProgress: false, _loginUrlOpened: false,
+    _loginTimedOut: false, _loginSuperseded: false, _resumePending: false, running: false,
+    loginProcess: { running: false, command: [] }, actionProcess: { running: false }
+  })
+  loginTransition.loginOrUp()
+  assertDeepEqual(Array.from(loginTransition.loginProcess.command), Array.from(context.timedCommand(tailscale.loginPlan(false, '').command)), 'turning on from Stopped sends the resume request')
+  loginTransition.loginProcess.running = false // the PATCH returns at once
+  loginTransition.parseStatus(JSON.stringify({ BackendState: 'Running' }))
+  assertEqual(loginTransition._desired, -1, 'a transient Running settles the optimistic on state')
+}
+resumeFromStopped()
+loginTransition.parseStatus(expiredAfterResume)
+assert(loginTransition._loginInProgress && loginTransition.loginProcess.running, 'resume continues into login when NeedsLogin follows a transient Running')
+assertDeepEqual(Array.from(loginTransition.loginProcess.command), Array.from(context.timedCommand(tailscale.loginPlan(true, '').command)), 'the continuation requests interactive login')
+assert(!loginTransition._resumePending, 'starting the login consumes the resume intent')
+
+resumeFromStopped()
+loginTransition.down()
+loginTransition.actionProcess.running = false
+loginTransition.parseStatus(expiredAfterResume)
+assert(!loginTransition._loginInProgress && !loginTransition.loginProcess.running, 'a disconnect after a transient Running cancels the resume intent')
+
+resumeFromStopped()
+vm.runInNewContext('(function() ' + connectDeadline + ')()', loginTransition)
+loginTransition.parseStatus(expiredAfterResume)
+assert(!loginTransition._loginInProgress && !loginTransition.loginProcess.running, 'a key expiring after the connect deadline does not start a login on its own')
+
 // Health notifications arrive every few seconds and do not change the panel.
 const refreshesBefore = statusRefreshes
 loginTransition.handleStateWatchData(JSON.stringify({ Version: '1.102.3', Health: {} }))

@@ -64,6 +64,10 @@ Item {
   property bool _loginSuperseded: false
   property bool _loginInProgress: false
   property bool _loginUrlOpened: false
+  // A resume that may yet reveal an expired key. A cached netmap can report
+  // Running for about a second before NeedsLogin, which settles _desired, so
+  // this intent lasts until the connect deadline, a login or a disconnect.
+  property bool _resumePending: false
   property int _stateWatchBackoffMs: 2000
   property string _preLoginAuthUrl: ""
   property double _lastAccountsRefreshMs: 0
@@ -381,7 +385,7 @@ Item {
     lastError = ""
     // A stopped daemon may reveal an expired key only after the resume request.
     // Continue that user-requested connection once the request has exited.
-    if (needsLogin && _desired === 1 && !loginProcess.running) {
+    if (needsLogin && (_desired === 1 || _resumePending) && !loginProcess.running) {
       connectTimeoutTimer.stop()
       loginOrUp()
     }
@@ -420,6 +424,7 @@ Item {
     // the optimistic off; only surface a message if the command fails.
     _desired = 0
     _loginInProgress = false
+    _resumePending = false
     // A resume or login request still in flight no longer reflects intent.
     if (loginProcess.running) _loginSuperseded = true
     loginTimeoutTimer.stop()
@@ -448,6 +453,7 @@ Item {
       connectTimeoutTimer.restart()
     }
     _loginInProgress = needsLogin
+    _resumePending = !needsLogin
     _loginUrlOpened = false
     _preLoginAuthUrl = authUrl
     loginProcess.command = timedCommand(plan.command)
@@ -534,6 +540,7 @@ Item {
 
     _loginUrlOpened = true
     _loginInProgress = false
+    _resumePending = false
     loginTimeoutTimer.stop()
     connectTimeoutTimer.stop()
     Quickshell.execDetached(["omarchy-launch-browser", url])
@@ -639,6 +646,7 @@ Item {
     interval: 20000
     repeat: false
     onTriggered: {
+      root._resumePending = false
       if (root._desired !== 1 || root.running) return
       root._desired = -1
       root.actionStatus = I18n.t("tailscale.stillStarting")
@@ -790,6 +798,7 @@ Item {
         loginTimeoutTimer.stop()
         root._desired = -1
         root._loginInProgress = false
+        root._resumePending = false
         connectTimeoutTimer.stop()
         root.showActionError(exitCode, combined, I18n.t("tailscale.startFailed"))
       } else {
