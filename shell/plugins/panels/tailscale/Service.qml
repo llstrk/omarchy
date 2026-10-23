@@ -118,6 +118,8 @@ Item {
     exitNodes = next
   }
 
+  Component.onCompleted: refresh()
+
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
     return value === undefined || value === null ? fallback : value
@@ -272,7 +274,10 @@ Item {
   function refreshStatusAndAccounts(forceAccounts, fullPeers) {
     if (!installed) return
     var launched = startStatusRefresh(fullPeers)
-    if (!mullvadExitNodesProcess.running) {
+    // Exit nodes and accounts appear only in the panel, so a background
+    // refresh with it closed runs the status client alone.
+    var panelData = peersWanted || fullPeers === true || forceAccounts === true
+    if (panelData && !mullvadExitNodesProcess.running) {
       _mullvadExitNodesOutput = ""
       _mullvadExitNodesError = ""
       mullvadExitNodesProcess.command = ["tailscale", "exit-node", "list"]
@@ -280,7 +285,7 @@ Item {
       launched = true
     }
     var now = Date.now()
-    var shouldRefreshAccounts = forceAccounts === true || accounts.length === 0 || now - _lastAccountsRefreshMs > 60000
+    var shouldRefreshAccounts = panelData && (forceAccounts === true || accounts.length === 0 || now - _lastAccountsRefreshMs > 60000)
     if (shouldRefreshAccounts && !accountsProcess.running) {
       _accountsOutput = ""
       _accountsError = ""
@@ -563,11 +568,14 @@ Item {
   }
 
   Timer {
+    // The IPN watcher refreshes status whenever State or Prefs change, which
+    // is all the bar icon shows. It carries no peer changes, so poll only
+    // while the open panel lists machines, exit nodes and accounts. Opening
+    // the panel refreshes them at once.
     id: refreshTimer
     interval: root.refreshIntervalSec * 1000
     repeat: true
-    running: true
-    triggeredOnStart: true
+    running: root.peersWanted
     onTriggered: root.refresh()
   }
 

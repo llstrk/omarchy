@@ -226,6 +226,24 @@ vm.runInNewContext('(function() ' + connectDeadline + ')()', loginTransition)
 loginTransition.parseStatus(expiredAfterResume)
 assert(!loginTransition._loginInProgress && !loginTransition.loginProcess.running, 'a key expiring after the connect deadline does not start a login on its own')
 
+// A background refresh with the panel closed runs the status client alone.
+const polling = { installed: true, peersWanted: false, accounts: [], _lastAccountsRefreshMs: 0, pollWatchdog: { running: false, start() { this.running = true } } }
+vm.runInNewContext(serviceSource.match(/  function refreshStatusAndAccounts\([^]*?\n  \}/)[0], polling)
+function pollClients(peersWanted, forceAccounts, fullPeers) {
+  const launched = []
+  Object.assign(polling, {
+    peersWanted,
+    startStatusRefresh() { launched.push('status'); return true },
+    mullvadExitNodesProcess: { running: false, set command(c) { launched.push('exit-node') } },
+    accountsProcess: { running: false, set command(c) { launched.push('accounts') } }
+  })
+  polling.refreshStatusAndAccounts(forceAccounts, fullPeers)
+  return launched
+}
+assertDeepEqual(pollClients(false, false, false), ['status'], 'a background refresh with the panel closed runs only the status client')
+assertDeepEqual(pollClients(true, false, false), ['status', 'exit-node', 'accounts'], 'the open panel refreshes exit nodes and accounts')
+assertDeepEqual(pollClients(false, false, true), ['status', 'exit-node', 'accounts'], 'opening the panel fetches exit nodes and accounts before its binding settles')
+
 // Health notifications arrive every few seconds and do not change the panel.
 const refreshesBefore = statusRefreshes
 loginTransition.handleStateWatchData(JSON.stringify({ Version: '1.102.3', Health: {} }))
