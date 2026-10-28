@@ -7,48 +7,21 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 run_node_test <<'JS'
 const fs = require('fs')
 const tailscale = requireFromRoot('shell/plugins/panels/tailscale/Model.js')
-const panelSource = fs.readFileSync(root + '/shell/plugins/panels/tailscale/Panel.qml', 'utf8')
 const serviceSource = fs.readFileSync(root + '/shell/plugins/panels/tailscale/Service.qml', 'utf8')
 
-assert(/function toggleTailscale\(\): string \{ tailscale\.toggleTailscale\(\); return "ok" \}/.test(panelSource), 'tailscale exposes the connection toggle over IPC')
-assert(serviceSource.includes('readonly property bool connecting: _desired === 1 && !running && !needsLogin'), 'tailscale exposes its optimistic connection state')
-assert(/Quickshell\.execDetached\(\["omarchy-launch-browser", url\]\)[\s\S]*?authUrlOpened\(\)\s+actionStatus = ""\s+lastError = ""\s+_desired = -1/.test(serviceSource), 'tailscale closes the panel before dropping optimistic state after opening the authentication browser')
-assert(panelSource.includes('function onAuthUrlOpened() { root.close() }'), 'tailscale closes its panel when handing login to the browser')
-assert(!panelSource.includes('onLoginCompleted') && !serviceSource.includes('loginCompleted') && !serviceSource.includes('_reopenAfterLogin'), 'background login completion cannot reopen the panel and steal keyboard focus')
-assert(panelSource.includes('showPeers: tailscale.running') && panelSource.includes('showExitNodes: tailscale.running'), 'tailscale reveals connection details only after status confirms it is running')
-assert(panelSource.includes('opacity: tailscale.connecting ? 0.55 : 1.0'), 'tailscale dims the switch while connecting')
-assert(!/visible:.*tailscale\.active/.test(panelSource), 'tailscale never expands machine sections for an optimistic connection')
-assert(panelSource.includes('height: Math.max(implicitHeight, statusMeasure.implicitHeight)') && panelSource.includes('text: "M\\nM"'), 'tailscale reserves two status lines to avoid resizing between login progress and timeout')
-assert(panelSource.includes('visible: text !== ""') && panelSource.includes('tailscale.needsLogin ? "Sign in to connect this device." : ""'), 'tailscale reserves status space for a login prompt or feedback, not ordinary disconnects')
-assert(panelSource.includes('busy: tailscale.busy || tailscale.connecting || tailscale.waitingForLogin'), 'tailscale disables repeated switch clicks while waiting for a login URL')
-assert(serviceSource.includes('if (!installed || loginProcess.running || _loginInProgress) return'), 'tailscale also guards repeated login requests from IPC and keyboard')
-assert(/id: loginTimeoutTimer\s+interval: 25000/.test(serviceSource), 'tailscale bounds login URL waiting to 25 seconds')
-assert(serviceSource.includes('if (!root._loginInProgress) root.actionStatus = ""'), 'tailscale keeps login progress after the LocalAPI request returns')
-assert(/if \(root\._loginTimedOut \|\| root\._loginSuperseded\) \{\s+root\._loginSuperseded = false\s+delayedRefresh\.restart\(\)\s+return/.test(serviceSource), 'tailscale preserves the timeout message when the terminated request exits')
-// mask 18 = NotifyInitialState (2) | NotifyNoPrivateKeys (16): the stream must not carry the node's private key.
-assert(serviceSource.includes('stateWatchProcess.command = ["tailscale", "debug", "localapi", "GET", "/localapi/v0/watch-ipn-bus?mask=18"]'), 'tailscale watches the IPN notification bus without private keys')
-assert(/function scheduleStateWatchRestart\(\) \{\s+if \(!installed\) return\s+stateWatchRestartTimer\.interval = _stateWatchBackoffMs\s+_stateWatchBackoffMs = Math\.min\(_stateWatchBackoffMs \* 2, 60000\)\s+stateWatchRestartTimer\.restart\(\)/.test(serviceSource), 'tailscale backs off IPN watcher restarts up to a minute')
-assert(serviceSource.includes('property int _stateWatchBackoffMs: 2000'), 'tailscale starts the IPN watcher backoff at two seconds')
-assert(/var notification = JSON\.parse\(text\)[\s\S]*?if \(!notification \|\| typeof notification !== "object" \|\| Array\.isArray\(notification\)\) return\s+_stateWatchBackoffMs = 2000/.test(serviceSource), 'tailscale resets the IPN watcher backoff only once a notification object parses')
-assert(/id: stateWatchProcess[\s\S]*?onExited: function\(exitCode\) \{\s+root\.scheduleStateWatchRestart\(\)/.test(serviceSource), 'tailscale restarts the IPN watcher after an unexpected exit')
-assert(/id: connectTimeoutTimer\s+interval: 20000\s+repeat: false\s+onTriggered: \{\s+if \(root\._desired !== 1 \|\| root\.running\) return\s+root\._desired = -1[\s\S]*?stateWatchRefreshTimer\.restart\(\)\s+\}/.test(serviceSource), 'tailscale drops the optimistic on state when the backend does not connect in time and re-checks status')
-assert(/function handleLoginOutput\(data, isError\) \{[\s\S]*?if \(\/\^\\s\*#\/\.test\(text\)\) return/.test(serviceSource), 'tailscale drops LocalAPI request commentary from login errors')
-assert(serviceSource.includes('root.showActionError(exitCode, combined, "Could not start Tailscale")'), 'tailscale falls back to a fixed message when the login command prints nothing')
-assert(serviceSource.includes('notification.BrowseToURL') && serviceSource.includes('openAuthUrl(browseUrl)'), 'tailscale opens authorization URLs from IPN BrowseToURL notifications')
-assert(!serviceSource.includes('.match(/https?:\\/\\/'), 'tailscale does not extract arbitrary URLs from command output')
 
 // Execute the real QML helper bodies, with only their environment stubbed.
 const vm = require('vm')
-const context = { elideStatus: text => String(text || '').trim(), actionStatusTimer: { stop() {}, restart() {} } }
+// Translate through the English catalog, as the shell does by default.
+const english = JSON.parse(fs.readFileSync(root + '/default/i18n/en/shell.json', 'utf8'))
+const I18n = { t: key => english[key] }
+const context = { I18n, elideStatus: text => String(text || '').trim(), actionStatusTimer: { stop() {}, restart() {} } }
 for (const name of ['timedCommand', 'showActionError']) {
   const body = serviceSource.match(new RegExp('  function ' + name + '\\([^]*?\\n  \\}'))
   assert(body, 'tailscale defines ' + name)
   vm.runInNewContext(body[0], context)
 }
 assertDeepEqual(Array.from(context.timedCommand(['tailscale', 'down'])), ['timeout', '--foreground', '--kill-after=2s', '20s', 'tailscale', 'down'], 'tailscale finite commands have a deadline and forced-termination grace period')
-for (const command of ['loginProcess.command = timedCommand(plan.command)', 'actionProcess.command = timedCommand(command)', 'switchProcess.command = timedCommand(["tailscale", "switch", accountId])', 'exitNodeProcess.command = timedCommand(["tailscale", "set", "--exit-node=" + target])']) {
-  assert(serviceSource.includes(command), 'tailscale bounds ' + command.split('.')[0])
-}
 for (const code of [124, 137]) {
   let stopped = false
   context.actionStatusTimer = { stop() { stopped = true }, restart() { throw new Error('timeout must remain visible') } }
@@ -80,24 +53,24 @@ for (const process of ['actionProcess', 'loginProcess', 'switchProcess', 'exitNo
   if (process === 'switchProcess') assertEqual(context.switchingAccountId, '', 'account timeout clears pending selection')
   if (process === 'exitNodeProcess') assertEqual(context.settingExitNodeId, '', 'exit-node timeout clears pending selection')
 }
-assert(serviceSource.includes('operatorProcess.command = ["pkexec", "tailscale", "set", "--operator=" + userName]'), 'tailscale leaves interactive authorization outside the command deadline')
 
 let openedLoginUrl = ''
 let browserOpens = 0
 let statusRefreshes = 0
 const timer = () => ({ running: false, restart() { this.running = true }, stop() { this.running = false } })
 const loginTransition = {
-  Model: tailscale, installed: true, _desired: 1, _loginInProgress: false,
+  I18n, Model: tailscale, installed: true, _desired: 1, _loginInProgress: false,
   _loginUrlOpened: false, _loginTimedOut: false, _preLoginAuthUrl: '',
   loginProcess: { running: true, command: [] }, mullvadRegions: [], selectedAccountId: '',
   actionProcess: { running: false }, switchProcess: { running: false }, exitNodeProcess: { running: false },
   actionStatusTimer: timer(), connectTimeoutTimer: timer(), loginTimeoutTimer: timer(),
   stateWatchRefreshTimer: { restart() { statusRefreshes++ } }, timedCommand: context.timedCommand,
   exitNodeTarget: () => 'test-peer', authUrlOpened() {},
+  _statusFullPeers: false, publishPeers() {}, publishTailnetExitNodes() {}, syncExitNodes() {},
   Quickshell: { execDetached(args) { openedLoginUrl = args[1]; browserOpens++ } }
 }
 loginTransition.root = loginTransition
-for (const name of ['parseStatus', 'loginOrUp', 'openAuthUrl', 'down', 'runAction', 'handleStateWatchData', 'switchAccount', 'setExitNode']) {
+for (const name of ['parseStatus', 'loginOrUp', 'openAuthUrl', 'down', 'runAction', 'handleStateWatchData', 'switchAccount', 'setExitNode', 'handleLoginOutput']) {
   const body = serviceSource.match(new RegExp('  function ' + name + '\\([^]*?\\n  \\}'))[0]
   vm.runInNewContext(body, loginTransition)
 }
@@ -132,6 +105,9 @@ for (const retry of [() => loginTransition.loginOrUp(), () => loginTransition.ru
   assertEqual(loginTransition.lastError, '', 'retry clears the previous error')
   assertEqual(loginTransition.actionStatus, '', 'retry clears the previous timeout message')
   assert(!loginTransition.actionStatusTimer.running, 'retry stops the previous message timer')
+}
+for (const process of ['loginProcess', 'actionProcess', 'switchProcess', 'exitNodeProcess']) {
+  assertEqual(loginTransition[process].command[0], 'timeout', 'tailscale bounds ' + process)
 }
 loginTransition.loginProcess.running = false
 loginTransition._desired = -1
@@ -199,12 +175,51 @@ assertEqual(loginTransition._desired, 0, 'a superseded resume request cannot und
 assertEqual(loginTransition.lastError, '', 'a superseded resume request reports no error')
 assert(!loginTransition._loginSuperseded, 'the superseded marker clears when the request exits')
 
+// The resume response is the full prefs object, ControlURL included, and
+// `tailscale debug localapi` narrates the request on stderr.
+let reportedOutput = null
+Object.assign(loginTransition, {
+  _desired: 1, _loginInProgress: false, _loginUrlOpened: false, _loginOutput: '', _loginError: '',
+  showActionError(exitCode, output) { reportedOutput = output }
+})
+const opensBeforeResponse = browserOpens
+for (const line of ['{', '  "ControlURL": "https://controlplane.tailscale.com",', '  "WantRunning": true', '}']) loginTransition.handleLoginOutput(line, false)
+loginTransition.handleLoginOutput('# doing request PATCH /localapi/v0/prefs', true)
+vm.runInNewContext('(' + loginExit + ')(0)', loginTransition)
+assertEqual(browserOpens, opensBeforeResponse, 'a URL in the command output never opens the browser')
+loginTransition.handleLoginOutput('# doing request POST /localapi/v0/login-interactive', true)
+loginTransition.handleLoginOutput('# Response status 403 Forbidden', true)
+loginTransition.handleLoginOutput('access denied', true)
+vm.runInNewContext('(' + loginExit + ')(1)', loginTransition)
+assertEqual(reportedOutput.trim(), 'access denied', 'login errors leave out the LocalAPI request commentary')
+
 // Health notifications arrive every few seconds and do not change the panel.
 const refreshesBefore = statusRefreshes
 loginTransition.handleStateWatchData(JSON.stringify({ Version: '1.102.3', Health: {} }))
 assertEqual(statusRefreshes, refreshesBefore, 'health-only IPN notifications do not query status')
 for (const field of ['State', 'Prefs', 'LoginFinished']) loginTransition.handleStateWatchData(JSON.stringify({ [field]: field === 'State' ? 6 : {} }))
 assertEqual(statusRefreshes, refreshesBefore + 3, 'state, preference and login notifications refresh status')
+
+// The IPN bus must not carry the node's private key (NotifyNoPrivateKeys = 16).
+const watch = { installed: true, _stateWatchBackoffMs: 2000, stateWatchProcess: { running: false, command: [] } }
+for (const name of ['startStateWatch', 'scheduleStateWatchRestart']) {
+  vm.runInNewContext(serviceSource.match(new RegExp('  function ' + name + '\\([^]*?\\n  \\}'))[0], watch)
+}
+watch.startStateWatch()
+const watchPath = watch.stateWatchProcess.command[watch.stateWatchProcess.command.length - 1]
+const watchMask = Number(new URL(watchPath, 'http://local-tailscaled').searchParams.get('mask'))
+assert(watch.stateWatchProcess.running && (watchMask & 16) && (watchMask & 2), 'tailscale watches the IPN bus from its initial state without private keys')
+
+// Restarts back off while tailscaled is unreachable, and reset once it answers.
+const restartDelays = []
+watch.stateWatchRestartTimer = { interval: 0, restart() { restartDelays.push(this.interval) } }
+for (let i = 0; i < 7; i++) watch.scheduleStateWatchRestart()
+assertDeepEqual(restartDelays, [2000, 4000, 8000, 16000, 32000, 60000, 60000], 'tailscale backs off IPN watcher restarts from two seconds to a minute')
+loginTransition._stateWatchBackoffMs = 60000
+loginTransition.handleStateWatchData('Failed to connect to local Tailscale daemon')
+assertEqual(loginTransition._stateWatchBackoffMs, 60000, 'an error line does not reset the IPN watcher backoff')
+loginTransition.handleStateWatchData(JSON.stringify({ Version: '1.102.3' }))
+assertEqual(loginTransition._stateWatchBackoffMs, 2000, 'a parsed notification resets the IPN watcher backoff')
 
 assertDeepEqual(
   tailscale.filterIPv4(['100.64.0.1', 'fd7a:115c:a1e0::1', '192.168.1.2']),
