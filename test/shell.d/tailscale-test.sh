@@ -272,6 +272,13 @@ assertEqual(loginTransition._stateWatchBackoffMs, 60000, 'an error line does not
 loginTransition.handleStateWatchData(JSON.stringify({ Version: '1.102.3' }))
 assertEqual(loginTransition._stateWatchBackoffMs, 2000, 'a parsed notification resets the IPN watcher backoff')
 
+// With the panel closed nothing polls, so the watcher exiting is the only sign tailscaled stopped.
+const watchExit = serviceSource.slice(serviceSource.indexOf('id: stateWatchProcess')).match(/onExited: (function\(exitCode\) \{[^]*?\n    \})/)[1]
+let watchExitRefreshes = 0
+const watchExitContext = { root: { scheduleStateWatchRestart() {} }, stateWatchRefreshTimer: { restart() { watchExitRefreshes++ } } }
+vm.runInNewContext('(' + watchExit + ')(1)', watchExitContext)
+assertEqual(watchExitRefreshes, 1, 'the IPN watcher exiting refreshes status')
+
 assertDeepEqual(
   tailscale.filterIPv4(['100.64.0.1', 'fd7a:115c:a1e0::1', '192.168.1.2']),
   ['100.64.0.1'],

@@ -705,6 +705,9 @@ Item {
     command: []
     stdout: SplitParser { onRead: function(data) { root.handleStateWatchData(data) } }
     onExited: function(exitCode) {
+      // Nothing polls while the panel is closed, so a stopped daemon would
+      // otherwise leave the last connected state on the bar.
+      stateWatchRefreshTimer.restart()
       root.scheduleStateWatchRestart()
     }
   }
